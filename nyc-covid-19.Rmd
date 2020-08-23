@@ -1,0 +1,733 @@
+---
+title: "Analysis of the COVID-19 Outbreak in New York City, New York"
+author: "Caroline Denecke, Sally Dufek, Tyler Sagendorf, Mason Skaruppa"
+date: "May 9, 2020"
+output: pdf_document
+bibliography: citations.bib
+nocite: | 
+  @R-forecast, @R-readr, @R-tidyverse, @R-lubridate, @R-ggplot2, @R-fpp2, @R-scales, @R-kableExtra
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, 
+                      fig.width = 6, fig.height = 4, fig.pos = 'H', 
+                      out.extra = '')
+```
+
+```{r libs, results = FALSE}
+# Required packages
+library(forecast)
+library(fpp2)
+library(ggplot2); theme_set(theme_minimal()) # Set theme for all plots
+library(kableExtra)
+library(lubridate)
+library(readr)
+library(tidyverse)
+
+```
+
+```{r data.prep}
+# --- Data Cleaning ---
+# Cases, Hospitalizations, and Deaths --- 
+# Read the data
+case_hosp_death <- read_csv("case-hosp-death.csv")
+
+# Training Data
+case_hosp_death_train <- case_hosp_death[1:50,]
+
+# Change variable names and date format
+daily_df_train <- case_hosp_death_train %>%
+  transmute(Date = mdy(DATE_OF_INTEREST),
+            Cases = CASE_COUNT,
+            Hosp = HOSPITALIZED_COUNT,
+            Death = DEATH_COUNT)
+
+# Testing Data
+case_hosp_death_test <- case_hosp_death[51:65,]
+# Change variable names and date format
+daily_df_test<- case_hosp_death_test %>%
+  transmute(Date = mdy(DATE_OF_INTEREST),
+            Cases = CASE_COUNT,
+            Hosp = HOSPITALIZED_COUNT,
+            Death = DEATH_COUNT)
+
+# Deaths by Category ---
+# Read the data
+probable_confirmed_dod <- read_csv("probable-confirmed-dod.csv")[1:40,]
+# Change variable names and date format
+probable_df <- probable_confirmed_dod %>%
+  transmute(Date = mdy(DATE_OF_INTEREST),
+            Confirmed = CONFIRMED_DEATHS,
+            Probable = PROBABLE_DEATHS)
+# Combined deaths = confirmed deaths + probable deaths
+probable_df['Combined'] <- probable_df$Confirmed + probable_df$Probable
+
+```
+
+```{r ts.obj}
+# --- Time Series Objects ---
+# Training Data ---
+# Cases
+cases_train_ts <- ts(daily_df_train$Cases)
+# Hospitalizations
+hosp_train_ts <- ts(daily_df_train$Hosp)
+# Deaths
+deaths_train_ts <- ts(daily_df_train$Death)
+
+# Testing Data ---
+# Cases
+cases_test_ts <- ts(daily_df_test$Cases)
+# Hospitalizations
+hosp_test_ts <- ts(daily_df_test$Hosp)
+# Deaths
+deaths_test_ts <- ts(daily_df_test$Death)
+
+```
+
+## **Abstract**
+
+**Objective:** To forecast the daily number of new COVID-19 cases, hospitalizations, and deaths in New York City, New York, from April 21, 2020 to May 5, 2020 based on models fit to prior data spanning from March 3, 2020 to April 20, 2020. 
+
+**Methods:** Autoregressive Integrated Moving Average (ARIMA) models were fit to the time series data from the New York City Department of Health and Mental Hygiene's coronavirus-data GitHub repository. These models were then used to forecast fifteen days in the future and the predictions were compared to the actual reported numbers for those days.
+
+**Results:** The results suggested that the daily number of deaths and hospitalizations in NYC during the forecasted time period would both decrease, and the daily number of cases would repeatedly decrease and then increase with no change in the mean. When we compared these forecasts to the real data, we found that only the number of deaths closely matched our predictions. The forecasted daily number of new cases was always greater than the true daily number of new cases, and the forecast did not exhibit the decreasing trend observed in the real data; however, the predictions did follow the same pattern of decreasing and increasing over time. Also, the true values were almost always within the 80% prediction intervals, and were always within the 95% prediction intervals. Similarly, the forecasted daily number of hospitalizations was always less than the true daily number of hospitalizations, though the true values were always within the 80% prediction intervals. 
+
+**Conclusions:** When it comes to a pandemic like COVID-19, there are many factors that we cannot account for in our models. Despite these limitations, we were able to predict the daily number of COVID-19 cases, hospitalization, and deaths in New York City, New York, with a high or moderate degree of accuracy.
+
+---
+
+# Introduction
+
+## Background
+
+COVID-19 is a type of coronavirus that may cause symptoms such as coughing, respiratory difficulties, fever, and chills. It is especially deadly to those who may be more vulnerable due to age or preexisting conditions: older adults, those with asthma, and those who are immunocompromised [@cdc-symptoms; @cdc-risk]. The virus originated in Wuhan, Hubei Province, China at the end of 2019, and is thought to have initially spread through "animal-to-person" contact, since "many of the patients at the epicenter of the outbreak...had some link to a large seafood and live animal market" [@cdc-summary]. Since then, it has rapidly spread from person-to-person to all parts of the world, and on March 11, 2020, the World Health Organization (WHO) officially classified the outbreak as a pandemic [@who-pandemic]. Despite global efforts to stop the spread of the disease, the number of cases continues to grow daily. As of May 6, 2020, 17:08 GMT, there were over 1.24 million confirmed cases of COVID-19 in the United States. This accounts for nearly one-third of all cases worldwide [@worldometer-US].
+
+We chose to review the data associated with the COVID-19 outbreak in New York City (NYC), New York, because it was one of the first US cities to be affected, so it has some of the most complete and accurate data. Also, NYC has the largest population and highest population density of any US city at 8.2 million people and about 27,013 people per square mile, respectively [@census]. These two characteristics provide an ideal environment for COVID-19 to spread on a large scale, since the virus can be transmitted through person-to-person contact.
+
+## Data Sources and Collection
+
+We used the “case-hosp-death.csv” and “probable-confirmed-dod.csv” files provided in the coronavirus-data GitHub repository by the New York City Department of Health and Mental Hygiene. The files that we used for this report were pulled on May 7, 2020, and only data from March 3 to May 5 was used. This is because the data is updated daily, and is "preliminary and subject to change," and it is mentioned that "the most recent data may be incomplete" ("README.md").
+
+The "case-hosp-death.csv" file "contains daily counts of new confirmed cases, hospitalizations, and deaths" where "cases are by date of diagnosis," "hospitalizations are by date of admission," and "deaths are by date of death." The "probable_confirmed-dod.csv" file contains counts of confirmed and probable deaths, where a confirmed death means "the decedent was a New York City resident who had a positive...[COVID-19] laboratory test," and a probable death means "the death certificate lists as a cause of death 'COVID-19' or an equivalent," but the decedent "had no known positive laboratory test" for COVID-19 ("README.md").
+
+
+**GitHub Repository:**
+
+*<a href="https://github.com/nychealth/coronavirus-data?files=1">https://github.com/nychealth/coronavirus-data?files=1</a>*
+
+
+# Methods
+
+We split the data from the "case-hosp-death.csv" file into training and testing sets. The training set consists of all observations from March 3 to April 20, and the testing set consists of all observations from April 21 to March 5. We then created three time series (TS) objects from each of the two data sets for the daily number of cases, hospitalizations, and deaths. The three TS objects from the training data would be used to fit ARIMA models while the three TS objects from the testing data would be used to compare to the values forecasted by the ARIMA models.
+
+To determine the forms of the ARIMA models for the number of cases, hospitalizations, and deaths in NYC, we used the `auto.arima` function in R. We then assessed these models by using the `Box.test` function to check whether there was evidence of a lack of fit. If the p-value reported by the test was large, that means there was no evidence that the model in question is a poor fit for the data (the residuals are likely uncorrelated). Of the models suggested by the `auto.arima` function, only the ARIMA(0,2,1) model for the daily number of deaths was a good fit. To find the model forms for the number of cases and hospitalizations, we created ARIMA models for all possible combinations of reasonable values for the parameters $p$, $d$, and $q$, and calculated the Ljung-Box test p-value for each of these models. Models with p-values less than 0.05 were immediately discarded, and the remaining models were sorted in descending order by p-value (Tables 1 and 2 in the Appendix). The final models for the number of cases and hospitalizations were the ones that maximized the Ljung-Box test p-value and minimized the sum of $p$ and $q$ (fewest number of terms).
+
+Once the final models were chosen, we predicted values of each time series from April 21 to May 5 (15 days beyond the scope of the training data). We also compared our forecasts to the true values reported for those days to assess the accuracy of our predictions.
+
+# Results
+
+## Exploratory Data Analysis
+
+We plotted the time series data for new cases, hospitalizations, and deaths (confirmed, probable, and combined) from March 3 to April 20. These plots are shown below.
+
+```{r eda1, fig.cap="Daily COVID-19 Cases, Hospitalizations, and Deaths in NYC"}
+# Dates for labeling
+dates <-  c(ymd("2020-03-01"), ymd("2020-03-11"), 
+             ymd("2020-03-21"), ymd("2020-03-31"), 
+             ymd("2020-04-10"), ymd("2020-04-20"))
+
+# --- EDA: Daily Reported Numbers ---
+ggplot(daily_df_train) +
+  geom_line(aes(x=Date, y=Cases), lty=1) +
+  geom_line(aes(x=Date, y=Hosp), lty=2) +
+  geom_line(aes(x=Date, y=Death), lty=3) +
+  annotate("text",
+           x = c(mdy("4/1/2020")),
+           y = c(6250, 1950, 700),
+           label = c("New Cases", "Hospitalizations", "Deaths"),
+           color = c("black", "black", "black"), size = 3.5) +
+  scale_y_continuous(name = "Daily Number",
+                     limits = c(0, 6500),
+                     breaks = seq(0, 6000, 1000),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  scale_x_date(labels = scales::date_format("%m-%d-%y"),
+               breaks = dates) +
+  theme(axis.title.x = element_blank(),
+        axis.text.y = element_text(size=11),
+        axis.title.y = element_text(size=12,
+                                    margin=ggplot2::margin(r=10)),
+        plot.title = element_blank())
+
+```
+
+From Figure 1, we can see that the number of new cases, hospitalizations, and deaths caused by COVID-19 appears to peak around the beginning of April. Generally, the number of deaths tends to be lower than the number of hospitalizations, and both are always lower than the number of new cases each day. None of these time series are stationary.
+
+
+```{r eda2, fig.cap="Daily COVID-19 Deaths in NYC by Category"}
+# --- EDA: Deaths by Category ---
+ggplot(probable_df) +
+  geom_line(aes(x=Date, y=Confirmed), lty=1) +
+  geom_line(aes(x=Date, y=Probable), lty=3) +
+  geom_line(aes(x=Date, y=Combined), lty=2) +
+  annotate("text", size=3,
+           x=c(mdy("4/9/2020")),
+           y=c(400, 190, 630),
+           label=c("Confirmed","Probable", "Combined")) +
+  scale_y_continuous(name = "Reported Number",
+                     limits = c(0, 810),
+                     breaks = seq(0, 800, 200),
+                     labels = seq(0, 800, 200)) +
+  scale_x_date(labels = scales::date_format("%m-%d-%y"),
+               breaks = dates[2:6]) +
+  theme(axis.title.x = element_blank(),
+        axis.text.y = element_text(size=11),
+        axis.title.y = element_text(size=12,
+                                    margin=ggplot2::margin(r=10)),
+        plot.title = element_blank())
+
+```
+
+In Figure 2, we can see the number of deaths attributed to COVID-19 broken down by category. The “Probable” time series shows daily death counts where the death certificate listed "COVID-19" as the cause of death, but the decedent had no positive laboratory test for COVID-19. The “Confirmed” time series is the daily number of deaths where the decedent did test positive for COVID-19. The “Combined” time series is the daily number of confirmed and probable deaths. We chose to use the series for the number of confirmed deaths, since we wanted our analysis to be as accurate as possible.
+
+\pagebreak
+
+## Modeling
+
+Below are plots of the original time series data for the daily number of cases, hospitalizations, and deaths in NYC ranging from March 3 to April 20, along with their fitted ARIMA models. The characteristic equations of each model are provided along with insights on the quality of fit.
+
+```{r models, results='hide'}
+# --- Modeling of Deaths, Hospitalizations, and Cases ---
+## Models
+model_death <- auto.arima(deaths_train_ts)
+model_hosp <- auto.arima(hosp_train_ts)
+model_cases <- auto.arima(cases_train_ts)
+
+## Modeling based on the auto.arima() function 
+deathARIMA1 <- Arima(deaths_train_ts, order=c(0,2,1), 
+                     include.mean=FALSE)
+hospARIMA1 <- Arima(hosp_train_ts, order=c(2,2,1), 
+                    include.mean=FALSE)
+casesARIMA1 <- Arima(cases_train_ts, order=c(0,1,2), 
+                     include.mean=FALSE)
+
+```
+
+```{r box.deaths, results='hide'}
+# --- Ljung-Box Tests ---
+# Deaths ---
+Box.test(deathARIMA1$residuals, lag = 20, fitdf = 1, type = "Ljung-Box")
+## Our p-value is 0.2212, indicating that we do not 
+## have autocorrelation, so this is a good model.
+
+```
+
+```{r box.hosp, results='hide'}
+# Hospitalizations ---
+# Model 1
+Box.test(hospARIMA1$residuals, lag = 20, fitdf = 3, type = "Ljung-Box")
+## There is still some autocorrelation in our residuals, 
+## so this is not a good model. Let's try something else.
+```
+
+```{r all.hosp.mods, results='hide'}
+# Hospitalizations - All Reasonable Models ---
+# All combinations of p, d, and q
+params <- expand.grid(p=seq(0,6), d=seq(0,2), q=seq(0,6))
+# fitdf for Box.test() is equal to p+q
+params$fit.df <- params$p + params$q
+# Empty vector for p-values from Ljung-Box test
+params$p.value <- rep(NA, nrow(params))
+
+# Create an ARIMA model and apply the Ljung-Box test
+# for all combinations in params
+for(i in 1:nrow(params)) {
+  # Model
+  hospARIMA_temp <- Arima(hosp_train_ts, 
+                      order = c(params$p[i], params$d[i], params$q[i]), 
+                      include.mean = FALSE, method="ML")
+  # Ljung-Box test p-value
+  params$p.value[i] <- Box.test(hospARIMA_temp$residuals, 
+                                lag=20, 
+                                fitdf = params$fit.df[i],
+                                type="Ljung-Box")$p.value
+}
+
+# Hospitalizations - All Models Table ---
+# ARIMA models with Ljung-Box test p-values > 0.05
+params <- params %>%
+  filter(p.value > 0.05) %>%
+  arrange(desc(p.value))
+
+# Display table
+kable(params, format="latex", align = rep('c',5),
+      caption = "ARIMA Models for COVID-19 Hospitalizations") %>%  
+  kable_styling(latex_options = "HOLD_position")
+
+# The simplest model is the ARIMA(6,2,0), but its
+# p-value is quite low, so we will go with the ARIMA(6,2,1)
+# model because it only has one more term and its p-value
+# is quite large, which indicates that its residuals 
+# are uncorrelated.
+
+```
+
+
+```{r hosp.mod2}
+# Hospitalizations ---
+# Final Model
+hospARIMA2 <- Arima(hosp_train_ts, order=c(6,2,1), 
+                    include.mean = FALSE)
+
+```
+
+```{r box.hosp2, results='hide'}
+# Hospitalizations ---
+Box.test(hospARIMA2$residuals, lag=20, fitdf = 7, type="Ljung-Box")
+# There is no evidence that the residuals are correlated.
+# This is a good model, and it has the largest p-value
+# of any that were tested.
+
+```
+
+
+```{r box.cases, results='hide'}
+# New Cases ---
+# Model 1
+Box.test(casesARIMA1$residuals, lag = 20, fitdf = 2, type = "Ljung-Box") 
+# Since the p-value is small, we should try a different model.
+
+```
+
+```{r all.cases.mods, results='hide'}
+# Cases - All Reasonable Models ---
+# All combinations of p, d, and q
+params2 <- expand.grid(p=seq(0,4), d=seq(0,2), q=seq(0,4))
+# fitdf for Box.test() is equal to p+q
+params2$fit.df <- params2$p + params2$q
+# Empty vector for p-values from Ljung-Box test
+params2$p.value <- rep(NA, nrow(params2))
+
+# Create an ARIMA model and apply the Ljung-Box test
+# for all combinations in params
+for(i in 1:nrow(params2)) {
+  
+  # Model
+  casesARIMA_temp <- Arima(cases_train_ts, 
+                      order = c(params2$p[i], params2$d[i], params2$q[i]), 
+                      include.mean = FALSE, method = "ML")
+  
+  # Ljung-Box test p-value
+  params2$p.value[i] <- Box.test(casesARIMA_temp$residuals,
+                                lag=20,
+                                fitdf = params2$fit.df[i],
+                                type="Ljung-Box")$p.value
+}
+
+# Cases - All Models Table ---
+# ARIMA models with Ljung-Box test p-values > 0.05
+params2 <- params2 %>%
+  filter(p.value > 0.05) %>%
+  arrange(desc(p.value))
+
+# Display table
+kable(params2, format = "latex", align = rep('c',5),
+      caption = "ARIMA Models for COVID-19 Cases") %>%  
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r cases.mod2}
+# New Cases ---
+# Final Model
+casesARIMA2 <- Arima(cases_train_ts, order=c(4,1,4), 
+                    include.mean = FALSE, method="ML")
+
+```
+
+```{r box.cases2, results='hide'}
+# Cases
+Box.test(casesARIMA2$residuals, lag=20, fitdf = 8, type="Ljung-Box")
+# There is no evidence that the residuals are correlated.
+# This is a good model, and it has the largest p-value
+# of any that were tested.
+
+```
+
+```{r mod.plot1, fig.cap="Daily COVID-19 Cases with Fitted Line"}
+# Cases ---
+
+# Data frames for plotting
+daily_df_train$fit.cases <- fitted(casesARIMA2)
+
+# TS with fitted line: ARIMA(4,1,4)
+ggplot(daily_df_train) +
+  geom_line(aes(x=Date, y=Cases, color="Time Series Data")) +
+  geom_line(aes(x=Date, y=fit.cases, color="Fitted ARIMA(4, 1, 4)")) +
+  scale_color_manual(values = c("red", "black")) +
+  scale_x_date(labels = scales::date_format("%m-%d-%y"),
+               breaks = dates) +
+  scale_y_continuous(name = "New Cases", 
+                     limits = c(0, 7000), 
+                     breaks = seq(0, 7000, 1000),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  labs(title = "Daily COVID-19 Cases in New York City, New York") +
+  theme(legend.position = c(0.198, 0.825),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=11,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size=12))
+
+```
+
+Figure 3 shows the original time series data for the number of new cases each day (black) along with the values obtained by fitting an ARIMA(4,1,4) model to the data (red). The characteristic equation for this model is
+$$(1-0.8586B + 1.4181B^2 - 0.7978B^3 + 0.9174B^4)(1-B)Y_t=(1 - 1.0535B + 1.254B^2-0.6946B^3+0.7441B^4)\varepsilon_t$$
+where $Y_t$ is the number of cases at time $t$, and $\varepsilon_t$ is white noise. This model was obtained by calling the final ARIMA model for cases. This is included in the Appendix under the "Final Models" subsection.
+
+We can see that the fitted line tends to be below the actual time series data, though we know that there is no evidence that this model is a poor fit, based on the Ljung-Box test output (p-value = 0.6648). See "Ljung-Box Tests" in the Appendix for details.
+
+```{r mod.plot2, fig.cap="Daily COVID-19 Hospitalizations with Fitted Line"}
+# Hospitalizations ---
+
+# Data frames for plotting
+daily_df_train$fit.hosp <- fitted(hospARIMA2)
+
+# TS with fitted line: ARIMA(6,2,1)
+ggplot(daily_df_train) +
+  geom_line(aes(x=Date, y=Hosp, color = "Time Series Data")) +
+  geom_line(aes(x=Date, y=fit.hosp, color = "Fitted ARIMA(6, 2, 1)")) +
+  scale_color_manual(values = c("red", "black")) +
+  scale_y_continuous(name = "Hospitalizations", 
+                     limits = c(0, 1800), 
+                     breaks = seq(0, 1800, 200),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  scale_x_date(labels = scales::date_format("%m-%d-%y"),
+               breaks = dates) +
+  labs(title = "Daily COVID-19 Hospitalizations in New York City, New York") +
+  theme(legend.position = c(0.228, 0.828),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=11,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size=12))
+
+```
+
+As with the number of cases, Figure 4 shows the original time series data for the number of daily hospitalizations in NYC with the fitted ARIMA(6,2,1) line. The characteristic equation for the fitted model is
+$$(1+1.2546B+1.209B^2+1.1486B^3 + 0.8146B^4+0.6526B^5+0.6546B^6)(1-B)^2Y_t = (1+0.7588B)\varepsilon_t$$
+
+Visually, it appears that this model is a very good fit for the original data, and this is confirmed by the Ljung-Box test output in the Appendix (p-value = 0.3358).
+
+```{r mod.plot3, fig.cap="Daily COVID-19 Deaths with Fitted Line"}
+# --- Time Series Plots with Overlayed Models ---
+# Deaths ---
+
+# Data frames for plotting
+daily_df_train$fit.death <- fitted(deathARIMA1)
+daily_deaths_train <- daily_df_train[10:50,] # Get rid of leading NA's
+
+# TS with fitted line: ARIMA(0,2,1)
+ggplot(daily_deaths_train) +
+  geom_line(aes(x=Date, y=Death, color="Time Series Data")) +
+  geom_line(aes(x=Date, y=fit.death, color="Fitted ARIMA(0, 2, 1)")) +
+  scale_color_manual(values = c("red", "black")) +
+  scale_y_continuous(name = "Deaths", 
+                     limits = c(0, 600), 
+                     breaks = seq(0, 600, 100),
+                     labels = seq(0, 600, 100)) +
+  scale_x_date(labels = scales::date_format("%m-%d-%y"),
+               breaks = dates[2:6]) +
+  labs(title = "Daily COVID-19 Deaths in New York City, New York") +
+  theme(legend.position = c(0.216, 0.804),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=11,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size=12))
+
+```
+
+Figure 5 is a plot of the original time series data for the number of daily COVID-19 deaths in NYC with the fitted ARIMA(0, 2, 1) line. The characteristic equation for the fitted model is
+$$(1 + 0.6185B)(1-B)^2Y_t =  \varepsilon_t$$
+
+This was the only final model that was chosen by the `auto.arima` function since its Ljung-Box test p-value was 0.2212, which suggests that there is no evidence that the model residuals are uncorrelated (that they aren't white noise and the model is a poor fit). 
+
+This model, unlike the other final models, was produced by the `auto.arima` function. Its Ljung-Box test p-value is fairly large (0.2212), which suggests that there is no evidence that the model residuals are correlated.
+
+Since all three models appear to accurately capture the behaviors of the original time series, we can proceed with forecasting.
+
+\pagebreak
+
+## Forecasting
+
+We forecasted values 15 days beyond the scope of the original data for each of the three time series (cases, hospitalizations, and deaths). Then, we graphically compared these predictions to the actual data for that time period.
+
+```{r ts2}
+# --- Time Series Objects for New Data (Testing Data) ---
+# Cases
+cases_test_ts <- ts(daily_df_test$Cases, start=51)
+# Hospitalizations
+hosp_test_ts <- ts(daily_df_test$Hosp, start=51)
+# Deaths
+deaths_test_ts <- ts(daily_df_test$Death, start=51)
+
+```
+
+```{r forecast}
+# Predictions based on final models
+deaths.predict <- forecast(deathARIMA1, h=nrow(daily_df_test))
+hosp.predict <- forecast(hospARIMA2, h=nrow(daily_df_test))
+cases.predict <- forecast(casesARIMA2, h=nrow(daily_df_test))
+
+```
+
+```{r pred.cases, fig.cap="Actual and Forecasted COVID-19 Cases in NYC"}
+# --- Prediction Plots ---
+# Dates for labeling
+dates2 <- c("03-01-20", "03-11-20", "03-21-20",
+            "03-31-20", "04-10-20", "04-20-20", "04-30-20")
+
+# Cases ---
+autoplot(cases_train_ts) +
+  autolayer(cases.predict, alpha=0.35, series = "Predictions") +
+  autolayer(cases_test_ts, lty=2, series = "New Data") +
+  labs(title = "Predicting COVID-19 Cases in NYC") +
+  scale_color_manual(guide = 'legend', 
+                     labels = c("New Data", "Predictions"), 
+                     values = c("black", "red")) +
+  scale_y_continuous(name = "New Cases", 
+                     breaks = seq(0, 7000, 1000),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  scale_x_continuous(name = "", breaks = seq(0,60,10),
+                     labels = dates2) +
+  coord_cartesian(ylim = c(0, 7200)) +
+  theme(legend.position = c(0.174, 0.804),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=12,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank())
+
+```
+
+From Figure 6, we can see that the model overpredicted the new daily number of cases. Also, the predictions do not seem to follow an overall decreasing trend like that of the actual data. However, the predictions do follow a similar pattern of increase and decrease.
+
+It is likely that the tail end of the training data (solid black line) heavily influenced the predictions, because it appears that from April 12 to April 20, the number of cases remained fairly constant.
+
+The real data was, for the most part, contained within the 80% prediction bands, and was always within the 95% prediction bands. The point forecasts, actual data, and prediction intervals are available in the Appendix under "Forecasts" for each of the three series.
+
+```{r pred.hosp, fig.cap="Actual and Forecasted COVID-19 Hospitalizations in NYC"}
+# Hospitalizations ---
+autoplot(hosp_train_ts) +
+  autolayer(hosp.predict, alpha=0.35, series = "Predictions") +
+  autolayer(hosp_test_ts, lty=2, series = "New Data") +
+  labs(title = "Predicting COVID-19 Hospitalizations in NYC") +
+  scale_color_manual(guide = 'legend', 
+                     labels = c("New Data", "Predictions"), 
+                     values = c("black", "red")) +
+  scale_y_continuous(name = "Hospitalizations", 
+                     breaks = seq(0, 1800, 200),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  scale_x_continuous(name = "", breaks = seq(0,60,10),
+                     labels = dates2) +
+  coord_cartesian(ylim = c(0, 1800)) +
+  theme(legend.position = c(0.174, 0.828),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=12,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank())
+
+```
+
+From Figure 7, we can see that the predicted number of hospitalizations was always lower than the actual number of hospitalizations. In fact, the model predicted a negative number of new COVID-19 hospitalizations. In context, we would interpret any negative values as zero, since new hospitalizations cannot be negative. Even though the actual values were higher than the predicted values, the true values were still within the 80% prediction bands for every day except April 21, and the true value that day was still within its respective 95% prediction interval.
+
+
+```{r pred.deaths, fig.cap="Actual and Forecasted COVID-19 Deaths in NYC"}
+# Deaths ---
+autoplot(deaths_train_ts) +
+  autolayer(deaths.predict, alpha=0.35, series = "Predictions") +
+  autolayer(deaths_test_ts, lty=2, series = "New Data") +
+  labs(title = "Predicting COVID-19 Deaths in NYC") +
+  scale_color_manual(guide = 'legend', 
+                     labels = c("New Data", "Predictions"), 
+                     values = c("black", "red")) +
+  scale_y_continuous(name = "Deaths", 
+                     breaks = seq(0, 800, 200),
+                     labels = scales::unit_format(big.mark = ",", unit = "")) +
+  scale_x_continuous(name = "", breaks = seq(10,60,10),
+                     labels = dates2[2:length(dates2)]) +
+  coord_cartesian(ylim = c(0, 800)) +
+  theme(legend.position = c(0.174, 0.726),
+        legend.background = element_rect(fill = "white", color = "grey80"),
+        legend.title = element_blank(),
+        legend.direction = "vertical",
+        axis.title.y = element_text(size=12,
+                                    margin=ggplot2::margin(r=10)),
+        axis.title.x = element_blank())
+```
+
+From Figure 8, we can see that the predicted and actual number of daily COVID-19 deaths in NYC are nearly identical. The model accurately predicted the true values from April 21 to May 5.
+
+
+# Conclusion
+
+When it comes to a pandemic, there are many factors that we cannot account for in our models. We cannot predict human behavior or how policies to combat COVID-19 may change over time, and we cannot capture how the virus may naturally mutate into different strains over time as well. Despite these limitations, however, we were able to predict trends in the daily number of COVID-19 cases, hospitalization, and deaths in New York City, New York, with a high or moderate degree of accuracy. Fortunately, it seems like new COVID-19 cases, hospitalizations, and deaths in New York City are decreasing every day, based on a visual inspection of the most recent data in Figures 6-8.
+
+\pagebreak
+
+# References
+
+\setlength{\parindent}{-0.5in}
+\setlength{\leftskip}{0.5in}
+\setlength{\parskip}{8pt}
+\noindent
+
+<div id="refs"></div>
+
+\setlength{\parindent}{0in}
+\setlength{\leftskip}{0in}
+
+\pagebreak
+
+# Appendix
+
+```{r, ref.label="all.hosp.mods", results = 'show'}
+```
+
+```{r, ref.label="all.cases.mods", results = 'show'}
+```
+
+## Ljung-Box Tests
+
+### Deaths
+
+**Model 1**
+
+```{r, ref.label="box.deaths", results = 'show'}
+```
+
+### Hospitalizations
+
+**Model 1**
+
+```{r, ref.label="box.hosp", results = 'show'}
+```
+
+**Model 2**
+
+```{r, ref.label="box.hosp2", results = 'show'}
+```
+
+### Cases
+
+**Model 1**
+
+```{r, ref.label="box.cases", results = 'show'}
+```
+
+**Model 2**
+
+```{r, ref.label="box.cases2", results = 'show'}
+```
+
+
+## Final Models
+
+**Cases**
+
+```{r mod.cases.final}
+# Cases ---
+casesARIMA2
+
+```
+
+**Hospitalizations**
+
+```{r mod.hosp.final}
+# Hospitalizations ---
+hospARIMA2
+
+```
+
+**Deaths**
+
+```{r mod.death.final}
+# --- Final Models ---
+# Deaths ---
+deathARIMA1
+
+```
+
+## Forecasts
+
+```{r pred.tab1}
+# --- Predictions ---
+# Deaths ---
+deaths.predict2 <- as.data.frame(deaths.predict) %>%
+  # Add dates and actual cases
+  mutate(Date = daily_df_test$Date,
+         Actual = daily_df_test$Death)
+# Reorder columns
+deaths.predict2 <- deaths.predict2[,c(6,7,seq(1,5))]
+
+# Rename columns
+names1 <- colnames(deaths.predict2)
+colnames(deaths.predict2) <- c("Date", "Actual", "Forecasted", names1[4:7])
+
+# Display
+kable(deaths.predict2, format="latex", align = c('l', rep('c', 6)),
+      caption = "Actual and Forecasted COVID-19 Deaths with Prediction Intervals") %>%  
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r pred.tab2}
+# Hospitalizations
+hosp.predict2 <- as.data.frame(hosp.predict) %>%
+  # Add dates and actual cases
+  mutate(Date = daily_df_test$Date,
+         Actual = daily_df_test$Hosp)
+
+# Reorder columns
+hosp.predict2 <- hosp.predict2[,c(6,7,seq(1,5))]
+
+# Rename columns
+colnames(hosp.predict2) <- c("Date", "Actual", "Forecasted", names1[4:7])
+
+# Display
+kable(hosp.predict2, format="latex", align = c('l', rep('c', 6)),
+      caption = "Actual and Forecasted COVID-19 Hospitalizations with Prediction Intervals") %>%  
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r pred.tab3}
+# Cases ---
+cases.predict2 <- as.data.frame(cases.predict) %>%
+  # Add dates and actual cases
+  mutate(Date = daily_df_test$Date,
+         Actual = daily_df_test$Cases)
+# Reorder columns
+cases.predict2 <- cases.predict2[,c(6,7,seq(1,5))]
+
+# Rename columns
+colnames(cases.predict2) <- c("Date", "Actual", "Forecasted", names1[4:7])
+
+# Display
+kable(cases.predict2, format="latex", align = c('l', rep('c', 6)),
+      caption = "Actual and Forecasted COVID-19 Cases with Prediction Intervals") %>%  
+  kable_styling(latex_options = "HOLD_position")
+```
+
+\pagebreak
+
+# R Code
+
+```{r, ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
